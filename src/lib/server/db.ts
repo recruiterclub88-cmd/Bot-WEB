@@ -1,13 +1,15 @@
 import { createClient } from '@supabase/supabase-js';
 
-function required(name: string): string {
-  const v = process.env[name];
-  if (!v) throw new Error(`Missing env ${name}`);
-  return v;
+const supabaseUrl = process.env.SUPABASE_URL || '';
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+
+if (!supabaseUrl || !supabaseKey) {
+  console.warn('⚠️ SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is missing. Database features will be unavailable.');
 }
 
 export const supabaseAdmin = createClient(
-  required('SUPABASE_URL'),
-  required('SUPABASE_SERVICE_ROLE_KEY'),
+  supabaseUrl || 'https://placeholder.supabase.co',
+  supabaseKey || 'placeholder',
   { auth: { persistSession: false } }
 );
+

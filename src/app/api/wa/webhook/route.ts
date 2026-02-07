@@ -7,13 +7,18 @@ import { randInt, sleep } from '@/lib/server/util';
 
 function required(name: string): string {
   const v = process.env[name];
-  if (!v) throw new Error(`Missing env ${name}`);
+  if (!v) {
+    console.warn(`⚠️ Missing environment variable: ${name}`);
+    return '';
+  }
   return v;
 }
 
 function getSecretFromReq(req: Request): string | null {
-  return req.headers.get('x-webhook-secret') || new URL(req.url).searchParams.get('secret');
+  const url = new URL(req.url);
+  return req.headers.get('x-webhook-secret') || url.searchParams.get('secret');
 }
+
 
 function parseGreenWebhook(body: any): { chatId: string; messageId: string; text: string } | null {
   const chatId =
@@ -40,20 +45,18 @@ function parseGreenWebhook(body: any): { chatId: string; messageId: string; text
   return { chatId: String(chatId), messageId: String(messageId), text: String(text) };
 }
 
-async function getSetting(key: string): Promise<string> {
-  const { data, error } = await supabaseAdmin.from('settings').select('value').eq('key', key).maybeSingle();
-  if (error) return '';
-  return data?.value || '';
-}
+
 
 export async function POST(req: Request) {
   // secret check
   const secret = getSecretFromReq(req);
-  if (secret !== required('WEBHOOK_SECRET')) {
+  const expectedSecret = required('WEBHOOK_SECRET');
+  if (!expectedSecret || secret !== expectedSecret) {
     return NextResponse.json({ ok: false, error: 'unauthorized' }, { status: 401 });
   }
 
   const body = await req.json().catch(() => null);
+
   if (!body) return NextResponse.json({ ok: false, error: 'invalid json' }, { status: 400 });
 
   const parsed = parseGreenWebhook(body);
@@ -76,18 +79,21 @@ export async function POST(req: Request) {
     .eq('wa_chat_id', chatId)
     .maybeSingle();
 
-  let contactId = contactRow?.id as string | undefined;
-  if (!contactId) {
+  let contact = contactRow;
+  if (!contact) {
     const { data: inserted, error } = await supabaseAdmin
       .from('contacts')
       .insert({ wa_chat_id: chatId, stage: 'start', lead_type: 'unknown', summary: '', opt_out: false })
       .select('id, stage, summary, lead_type, opt_out')
       .single();
     if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
-    contactId = inserted.id;
-  } else if (contactRow?.opt_out) {
+    contact = inserted;
+  } else if (contact.opt_out) {
     return NextResponse.json({ ok: true, ignored: true });
   }
+
+  const contactId = contact.id;
+
 
   // dedup: try insert inbound message unique by provider_message_id
   const { error: inErr } = await supabaseAdmin.from('messages').insert({
@@ -105,15 +111,26 @@ export async function POST(req: Request) {
     // other errors still proceed cautiously
   }
 
-  // load settings
-  const systemPrompt = await getSetting('system_prompt');
-  const siteUrl = await getSetting('site_url');
-  const candidateLink = await getSetting('candidate_link');
-  const agencyLink = await getSetting('agency_link');
-  const tone = await getSetting('tone');
+  // load settings in one batch to reduce RTT (critical for Vercel timeout)
+  const { data: settingsRows } = await supabaseAdmin
+    .from('settings')
+    .select('key, value')
+    .in('key', ['system_prompt', 'site_url', 'candidate_link', 'agency_link', 'tone']);
 
-  const stage = contactRow?.stage || 'start';
-  const summary = contactRow?.summary || '';
+  const settings: Record<string, string> = {};
+  (settingsRows || []).forEach((row: any) => settings[row.key] = row.value);
+
+
+  const systemPrompt = settings['system_prompt'] || '';
+  const siteUrl = settings['site_url'] || '';
+  const candidateLink = settings['candidate_link'] || '';
+  const agencyLink = settings['agency_link'] || '';
+  const tone = settings['tone'] || '';
+
+
+  const stage = contact.stage || 'start';
+  const summary = contact.summary || '';
+
 
   const { data: recentMsgs } = await supabaseAdmin
     .from('messages')
@@ -122,7 +139,8 @@ export async function POST(req: Request) {
     .order('created_at', { ascending: true })
     .limit(30);
 
-  const memory = { summary, recent: (recentMsgs || []).map(m => ({ direction: m.direction, text: m.text })) };
+  const memory = { summary, recent: (recentMsgs || []).map((m: any) => ({ direction: m.direction, text: m.text })) };
+
 
   const fullPrompt = [
     systemPrompt || '',
@@ -143,8 +161,9 @@ export async function POST(req: Request) {
     if (link) reply = `${reply}\n\nАнкета/регистрация: ${link}`;
   }
 
-  // random human delay
-  await sleep(randInt(3000, 12000));
+  // random human delay (reduced for Vercel 10s timeout)
+  await sleep(randInt(1000, 5000));
+
 
   // send message
   try {
