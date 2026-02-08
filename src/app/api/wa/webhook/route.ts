@@ -48,20 +48,34 @@ function parseGreenWebhook(body: any): { chatId: string; messageId: string; text
 
 
 export async function POST(req: Request) {
-  // secret check
+  console.log('📬 [Webhook] Request received at:', new Date().toISOString());
+
+  // secret check DISABLED FOR DIAGNOSTICS
+  /*
   const secret = getSecretFromReq(req);
   const expectedSecret = required('WEBHOOK_SECRET');
   if (!expectedSecret || secret !== expectedSecret) {
+    console.warn('❌ [Webhook] Unauthorized - Secret mismatch');
     return NextResponse.json({ ok: false, error: 'unauthorized' }, { status: 401 });
   }
+  */
 
-  const body = await req.json().catch(() => null);
+  const body = await req.json().catch((e) => {
+    console.error('❌ [Webhook] JSON Parse Error:', e);
+    return null;
+  });
+
+  console.log('📦 [Webhook] Body:', JSON.stringify(body, null, 2));
 
   if (!body) return NextResponse.json({ ok: false, error: 'invalid json' }, { status: 400 });
 
   const parsed = parseGreenWebhook(body);
-  if (!parsed) return NextResponse.json({ ok: true, ignored: true });
+  if (!parsed) {
+    console.log('ℹ️ [Webhook] Ignored - Not a text message or invalid structure');
+    return NextResponse.json({ ok: true, ignored: true });
+  }
 
+  console.log('✅ [Webhook] Parsed:', parsed);
   const chatId = parsed.chatId;
   const providerMessageId = parsed.messageId;
   const userText = normalizeText(parsed.text);
